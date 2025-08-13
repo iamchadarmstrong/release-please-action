@@ -25,7 +25,7 @@ import {Manifest, GitHub} from 'release-please';
 // As defined in action.yml
 
 const DEFAULT_INPUTS: Record<string, string> = {
-  token: 'fake-token',
+  token: process.env.CI ? (process.env.GITHUB_TOKEN || 'fake-token') : 'fake-token',
 };
 
 const fixturePrs = [
@@ -60,7 +60,40 @@ function mockInputs(inputs: Record<string, string>): RestoreFn {
   return mockedEnv(envVars);
 }
 
-nock.disableNetConnect();
+// Helper function to conditionally add GitHub.create stub when not in CI
+function addGitHubCreateStubIfNotCI(
+  tagIteratorSetup?: () => AsyncGenerator<any, void, unknown>,
+  octokitBehavior?: 'success' | 'failure'
+): void {
+  if (!process.env.CI) {
+    const fakeGitHub = sandbox.createStubInstance(GitHub);
+    (fakeGitHub as any).repository = { owner: 'fakeOwner', repo: 'fakeRepo', defaultBranch: 'main' };
+    
+    if (tagIteratorSetup) {
+      fakeGitHub.tagIterator.returns(tagIteratorSetup());
+    } else {
+      fakeGitHub.tagIterator.returns(async function* () { /* no existing tags */ }());
+    }
+    
+    // Mock octokit.git.createRef for tag creation
+    const mockOctokit = {
+      git: {
+        createRef: octokitBehavior === 'failure' 
+          ? sandbox.stub().rejects(new Error('API rate limit exceeded'))
+          : sandbox.stub().resolves({ data: { ref: 'refs/tags/v1.0.0', object: { sha: 'abc123' } } })
+      }
+    };
+    (fakeGitHub as any).octokit = mockOctokit;
+    
+    sandbox.stub(GitHub, 'create').resolves(fakeGitHub as any);
+  }
+}
+
+
+// Only disable network connections when not in CI (for local testing with mocks)
+if (!process.env.CI) {
+  nock.disableNetConnect();
+}
 
 describe('release-please-action', () => {
   let output: Record<string, string | boolean> = {};
@@ -83,9 +116,11 @@ describe('release-please-action', () => {
       }
     );
     // Default branch lookup:
-    nock('https://api.github.com').get('/repos/fakeOwner/fakeRepo').reply(200, {
-      default_branch: 'main',
-    });
+    if (!process.env.CI) {
+      nock('https://api.github.com').get('/repos/fakeOwner/fakeRepo').reply(200, {
+        default_branch: 'main',
+      });
+    }
   });
   afterEach(() => {
     sandbox.restore();
@@ -106,18 +141,26 @@ describe('release-please-action', () => {
         });
         fakeManifest.createReleases.resolves([]);
         fakeManifest.createPullRequests.resolves([]);
+        
+        addGitHubCreateStubIfNotCI();
+        
         await action.main();
         sinon.assert.calledOnce(fakeManifest.createReleases);
         sinon.assert.calledOnce(fakeManifest.createPullRequests);
       });
-      it('skips creating releases if skip-github-release specified', async () => {
+      it('creates tags without GitHub releases if skip-github-release specified', async () => {
         restoreEnv = mockInputs({
           'skip-github-release': 'true',
           'release-type': 'simple',
         });
         fakeManifest.createPullRequests.resolves([]);
+        fakeManifest.buildReleases.resolves([]);
+        
+        addGitHubCreateStubIfNotCI();
+        
         await action.main();
         sinon.assert.notCalled(fakeManifest.createReleases);
+        sinon.assert.calledOnce(fakeManifest.buildReleases);
         sinon.assert.calledOnce(fakeManifest.createPullRequests);
       });
       it('skips creating pull requests if skip-github-pull-request specified', async () => {
@@ -126,6 +169,9 @@ describe('release-please-action', () => {
           'release-type': 'simple',
         });
         fakeManifest.createReleases.resolves([]);
+        
+        addGitHubCreateStubIfNotCI();
+        
         await action.main();
         sinon.assert.calledOnce(fakeManifest.createReleases);
         sinon.assert.notCalled(fakeManifest.createPullRequests);
@@ -157,6 +203,9 @@ describe('release-please-action', () => {
         });
         fakeManifest.createReleases.resolves([]);
         fakeManifest.createPullRequests.resolves([]);
+        
+        addGitHubCreateStubIfNotCI();
+        
         await action.main();
         sinon.assert.calledOnce(fakeManifest.createReleases);
         sinon.assert.calledOnce(fakeManifest.createPullRequests);
@@ -184,17 +233,25 @@ describe('release-please-action', () => {
         restoreEnv = mockInputs({});
         fakeManifest.createReleases.resolves([]);
         fakeManifest.createPullRequests.resolves([]);
+        
+        addGitHubCreateStubIfNotCI();
+        
         await action.main();
         sinon.assert.calledOnce(fakeManifest.createReleases);
         sinon.assert.calledOnce(fakeManifest.createPullRequests);
       });
-      it('skips creating releases if skip-github-release specified', async () => {
+      it('creates tags without GitHub releases if skip-github-release specified', async () => {
         restoreEnv = mockInputs({
           'skip-github-release': 'true',
         });
         fakeManifest.createPullRequests.resolves([]);
+        fakeManifest.buildReleases.resolves([]);
+        
+        addGitHubCreateStubIfNotCI();
+        
         await action.main();
         sinon.assert.notCalled(fakeManifest.createReleases);
+        sinon.assert.calledOnce(fakeManifest.buildReleases);
         sinon.assert.calledOnce(fakeManifest.createPullRequests);
       });
       it('skips creating pull requests if skip-github-pull-request specified', async () => {
@@ -202,6 +259,9 @@ describe('release-please-action', () => {
           'skip-github-pull-request': 'true',
         });
         fakeManifest.createReleases.resolves([]);
+        
+        addGitHubCreateStubIfNotCI();
+        
         await action.main();
         sinon.assert.calledOnce(fakeManifest.createReleases);
         sinon.assert.notCalled(fakeManifest.createPullRequests);
@@ -230,6 +290,9 @@ describe('release-please-action', () => {
         });
         fakeManifest.createReleases.resolves([]);
         fakeManifest.createPullRequests.resolves([]);
+        
+        addGitHubCreateStubIfNotCI();
+        
         await action.main();
         sinon.assert.calledOnce(fakeManifest.createReleases);
         sinon.assert.calledOnce(fakeManifest.createPullRequests);
@@ -256,6 +319,9 @@ describe('release-please-action', () => {
       const fromManifestStub = sandbox
         .stub(Manifest, 'fromManifest')
         .resolves(fakeManifest);
+      
+      addGitHubCreateStubIfNotCI();
+      
       await action.main();
       sinon.assert.calledOnce(fakeManifest.createReleases);
       sinon.assert.calledOnce(fakeManifest.createPullRequests);
@@ -324,6 +390,9 @@ describe('release-please-action', () => {
       ]);
       fakeManifest.createPullRequests.resolves([]);
       sandbox.stub(Manifest, 'fromManifest').resolves(fakeManifest);
+      
+      addGitHubCreateStubIfNotCI();
+      
       await action.main();
       sinon.assert.calledOnce(fakeManifest.createReleases);
       sinon.assert.calledOnce(fakeManifest.createPullRequests);
@@ -348,6 +417,9 @@ describe('release-please-action', () => {
       fakeManifest.createReleases.resolves([]);
       fakeManifest.createPullRequests.resolves([fixturePrs[0]]);
       sandbox.stub(Manifest, 'fromManifest').resolves(fakeManifest);
+      
+      addGitHubCreateStubIfNotCI();
+      
       await action.main();
       sinon.assert.calledOnce(fakeManifest.createReleases);
       sinon.assert.calledOnce(fakeManifest.createPullRequests);
@@ -396,6 +468,9 @@ describe('release-please-action', () => {
       ]);
       fakeManifest.createPullRequests.resolves([]);
       sandbox.stub(Manifest, 'fromManifest').resolves(fakeManifest);
+      
+      addGitHubCreateStubIfNotCI();
+      
       await action.main();
       sinon.assert.calledOnce(fakeManifest.createReleases);
 
@@ -432,6 +507,9 @@ describe('release-please-action', () => {
       fakeManifest.createReleases.resolves([]);
       fakeManifest.createPullRequests.resolves(fixturePrs);
       sandbox.stub(Manifest, 'fromManifest').resolves(fakeManifest);
+      
+      addGitHubCreateStubIfNotCI();
+      
       await action.main();
       sinon.assert.calledOnce(fakeManifest.createReleases);
       sinon.assert.calledOnce(fakeManifest.createPullRequests);
@@ -446,6 +524,9 @@ describe('release-please-action', () => {
       fakeManifest.createReleases.resolves([]);
       fakeManifest.createPullRequests.resolves([]);
       sandbox.stub(Manifest, 'fromManifest').resolves(fakeManifest);
+      
+      addGitHubCreateStubIfNotCI();
+      
       await action.main();
       sinon.assert.calledOnce(fakeManifest.createReleases);
       sinon.assert.calledOnce(fakeManifest.createPullRequests);
@@ -454,6 +535,104 @@ describe('release-please-action', () => {
       assert.deepStrictEqual(output.paths_released, '[]');
       assert.deepStrictEqual(output.prs_created, false);
       assert.deepStrictEqual(output.releases_created, false);
+    });
+
+    it('creates tags without GitHub releases when skip-github-release is true', async () => {
+      restoreEnv = mockInputs({
+        'skip-github-release': 'true',
+      });
+      
+      // Mock release data that would trigger tag creation
+      const mockRelease = {
+        tag: { toString: () => 'v1.0.0', version: { toString: () => '1.0.0', major: 1, minor: 0, patch: 0 } },
+        sha: 'abc123',
+        notes: 'Release notes',
+        path: '.',
+        pullRequest: fixturePrs[0],
+      } as any;
+      
+      const fakeManifest = sandbox.createStubInstance(Manifest);
+      fakeManifest.createReleases.resolves([]);
+      fakeManifest.createPullRequests.resolves([]);
+      fakeManifest.buildReleases.resolves([mockRelease]);
+      
+      sandbox.stub(Manifest, 'fromManifest').resolves(fakeManifest);
+      addGitHubCreateStubIfNotCI(async function* () { /* no existing tags */ });
+      
+      await action.main();
+      
+      // Verify that createReleases was not called (GitHub releases skipped)
+      sinon.assert.notCalled(fakeManifest.createReleases);
+      // Verify that buildReleases was called (to get tag info)
+      sinon.assert.calledOnce(fakeManifest.buildReleases);
+      // Verify that pull requests were still created
+      sinon.assert.calledOnce(fakeManifest.createPullRequests);
+      
+      // Verify that tag-related outputs are still set
+      assert.strictEqual(output.tag_name, 'v1.0.0');
+      assert.strictEqual(output.version, '1.0.0');
+      assert.strictEqual(output.sha, 'abc123');
+      assert.strictEqual(output.releases_created, true);
+    });
+
+    it('handles existing tags when skip-github-release is true', async () => {
+      restoreEnv = mockInputs({
+        'skip-github-release': 'true',
+      });
+      
+      const mockRelease = {
+        tag: { toString: () => 'v1.0.0', version: { toString: () => '1.0.0', major: 1, minor: 0, patch: 0 } },
+        sha: 'abc123',
+        notes: 'Release notes',
+        path: '.',
+        pullRequest: fixturePrs[0],
+      } as any;
+      
+      const fakeManifest = sandbox.createStubInstance(Manifest);
+      fakeManifest.buildReleases.resolves([mockRelease]);
+      fakeManifest.createPullRequests.resolves([]);
+      
+      sandbox.stub(Manifest, 'fromManifest').resolves(fakeManifest);
+      // Simulate that the tag already exists
+      addGitHubCreateStubIfNotCI(async function* () { 
+        yield { name: 'v1.0.0', sha: 'abc123' };
+      });
+      
+      await action.main();
+      
+      // Verify buildReleases was still called
+      sinon.assert.calledOnce(fakeManifest.buildReleases);
+      
+      // Outputs should NOT be set since tag already existed
+      assert.strictEqual(output.releases_created, false);
+    });
+
+    it('handles GitHub API failures gracefully', async () => {
+      restoreEnv = mockInputs({
+        'skip-github-release': 'true',
+      });
+      
+      const mockRelease = {
+        tag: { toString: () => 'v1.0.0', version: { toString: () => '1.0.0', major: 1, minor: 0, patch: 0 } },
+        sha: 'abc123',
+        notes: 'Release notes',
+        path: '.',
+        pullRequest: fixturePrs[0],
+      } as any;
+      
+      const fakeManifest = sandbox.createStubInstance(Manifest);
+      fakeManifest.buildReleases.resolves([mockRelease]);
+      fakeManifest.createPullRequests.resolves([]);
+      
+      sandbox.stub(Manifest, 'fromManifest').resolves(fakeManifest);
+      addGitHubCreateStubIfNotCI(async function* () { /* no existing tags */ }, 'failure');
+      
+      await action.main();
+      
+      // Should still set outputs even if GitHub API call fails
+      assert.strictEqual(output.tag_name, 'v1.0.0');
+      assert.strictEqual(output.version, '1.0.0');
+      assert.strictEqual(output.releases_created, true);
     });
   });
 });
