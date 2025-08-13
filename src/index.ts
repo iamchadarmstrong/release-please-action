@@ -103,11 +103,11 @@ function loadOrBuildManifest(
     );
   }
   const manifestOverrides = inputs.fork || inputs.skipLabeling
-    ? {
-        fork: inputs.fork,
-        skipLabeling: inputs.skipLabeling,
-      }
-    : {};
+      ? {
+          fork: inputs.fork,
+          skipLabeling: inputs.skipLabeling,
+        }
+      : {};
   core.debug('Loading manifest from config file');
   return Manifest.fromManifest(
     github,
@@ -118,15 +118,101 @@ function loadOrBuildManifest(
   );
 }
 
+async function createTagsOnly(
+  manifest: Manifest,
+  github: GitHub,
+): Promise<(CreatedRelease | undefined)[]> {
+  core.debug('Building releases to extract tag information');
+  const releases = await manifest.buildReleases();
+  const createdReleases: (CreatedRelease | undefined)[] = [];
+
+  for (const release of releases) {
+    if (release) {
+      const tagName = release.tag.toString();
+      core.info(`Creating tag: ${tagName} (GitHub release will be skipped)`);
+
+      try {
+        // Check if tag already exists by looking at existing tags
+        let tagExists = false;
+        for await (const tag of github.tagIterator()) {
+          if (tag.name === tagName) {
+            tagExists = true;
+            core.info(`Tag ${tagName} already exists, skipping`);
+            break;
+          }
+        }
+
+        if (!tagExists) {
+          // Create tag using GitHub API
+          try {
+            await (github as any).octokit.git.createRef({
+              owner: (github as any).repository.owner,
+              repo: (github as any).repository.repo,
+              ref: `refs/tags/${tagName}`,
+              sha: release.sha,
+            });
+            
+            core.info(`Successfully created tag ${tagName} at commit ${release.sha}`);
+            
+            // Return a release object that represents the created tag
+            createdReleases.push({
+              id: 0,
+              tagName,
+              sha: release.sha,
+              notes: release.notes || '',
+              url: undefined, // No GitHub release URL since we only created a tag
+              path: release.path,
+              version: release.tag.version.toString(),
+              major: release.tag.version.major,
+              minor: release.tag.version.minor,
+              patch: release.tag.version.patch,
+              prNumber: release.pullRequest.number,
+            } as unknown as CreatedRelease);
+          } catch (apiError: any) {
+            core.warning(
+              `Failed to create tag ${tagName} using GitHub API: ${apiError.message}. ` +
+              `Tag needs to be created manually at commit ${release.sha}.`
+            );
+            
+            // Still return the release info for outputs
+            createdReleases.push({
+              id: 0,
+              tagName,
+              sha: release.sha,
+              notes: release.notes || '',
+              url: undefined,
+              path: release.path,
+              version: release.tag.version.toString(),
+              major: release.tag.version.major,
+              minor: release.tag.version.minor,
+              patch: release.tag.version.patch,
+              prNumber: 0,
+            } as unknown as CreatedRelease);
+          }
+        }
+      } catch (error: any) {
+        core.error(`Failed to process tag ${tagName}: ${error.message}`);
+      }
+    }
+  }
+
+  return createdReleases;
+}
+
 export async function main() {
   core.info(`Running release-please version: ${VERSION}`)
   const inputs = parseInputs();
   const github = await getGitHubInstance(inputs);
 
+  // Handle releases and tags separately to support skip-github-release
+  const manifest = await loadOrBuildManifest(github, inputs);
+
   if (!inputs.skipGitHubRelease) {
-    const manifest = await loadOrBuildManifest(github, inputs);
     core.debug('Creating releases');
     outputReleases(await manifest.createReleases());
+  } else {
+    core.debug('Creating tags without GitHub releases');
+    outputReleases(await createTagsOnly(manifest, github));
   }
 
   if (!inputs.skipGitHubPullRequest) {
